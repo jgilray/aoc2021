@@ -2,6 +2,7 @@
 
 use hex::FromHex;
 
+// the raw data from the input hex string along with a pointers to the next bit to process
 #[derive(Debug)]
 struct BinaryRep {
     raw: Vec<u8>,
@@ -10,25 +11,30 @@ struct BinaryRep {
 }
 
 impl BinaryRep {
-    fn new(s: &str) -> Result<Self, &str> {
+    fn new(s: &str) -> Result<Self, String> {
         match Vec::from_hex(s) {
             Ok(raw) => Ok(Self {
                 raw,
                 rawidx: 0,
                 inneridx: 8,
             }),
-            Err(_) => Err("Invalid Hex string"),
+            Err(e) => Err(format!("{}", e)),
         }
     }
 
-    fn get_next_chunk(&mut self, n: usize) -> Result<usize, &str> {
-        let mut retval = 0;
+    // chunk-wise iterator
+    fn get_next_chunk(&mut self, n: usize) -> Result<u64, String> {
+        if std::mem::size_of::<u64>() * 8 < n {
+            return Err("chunk size too large".to_string());
+        }
+
+        let mut retval: u64 = 0;
         for _ in 0..n {
             if let Some(nv) = self.next() {
                 retval <<= 1;
                 retval += nv;
             } else {
-                return Err("unexpected end of data");
+                return Err("unexpected end of data".to_string());
             }
         }
 
@@ -38,8 +44,8 @@ impl BinaryRep {
 
 // bit-wise iterator
 impl Iterator for BinaryRep {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
+    type Item = u64;
+    fn next(&mut self) -> Option<u64> {
         if self.rawidx >= self.raw.len() {
             None
         } else {
@@ -58,6 +64,7 @@ impl Iterator for BinaryRep {
     }
 }
 
+// operator types
 #[derive(Debug, PartialEq)]
 enum OpType {
     Sum,
@@ -70,7 +77,7 @@ enum OpType {
     Equal,
 }
 
-fn convert_type(tval: u8) -> Result<OpType, &'static str> {
+fn convert_type(tval: u8) -> Result<OpType, String> {
     match tval {
         0 => Ok(OpType::Sum),
         1 => Ok(OpType::Prod),
@@ -80,25 +87,26 @@ fn convert_type(tval: u8) -> Result<OpType, &'static str> {
         5 => Ok(OpType::Greater),
         6 => Ok(OpType::Less),
         7 => Ok(OpType::Equal),
-        _ => Err("bad operation type"),
+        _ => Err("bad operation type".to_string()),
     }
 }
 
 #[derive(Debug)]
 enum PacketType {
-    Literal(usize),                // stores value in packet
+    Literal(u64),                // stores value in packet
     Operator(OpType, Vec<Packet>), // stores Operator type and sub-packets
 }
 
+// packet: with version, bit length and the packet type (see above)
 #[derive(Debug)]
 struct Packet {
     version: u8,
-    bitc: usize,
+    bitc: u64,
     ptype: PacketType,
 }
 
 impl Packet {
-    fn new(version: u8, optype: OpType, br: &mut BinaryRep) -> Result<Self, &str> {
+    fn new(version: u8, optype: OpType, br: &mut BinaryRep) -> Result<Self, String> {
         if optype == OpType::Literal {
             let (val, bitc) = parse_literal(br)?;
             Ok(Self {
@@ -130,7 +138,7 @@ impl Packet {
     }
 
     // part two - evaluate the packet expression
-    fn eval(&self) -> Result<usize, &str> {
+    fn eval(&self) -> Result<u64, String> {
         let mut retval = 0;
 
         match &self.ptype {
@@ -150,7 +158,7 @@ impl Packet {
                     Ok(retval)
                 }
                 OpType::Min => {
-                    retval = usize::MAX;
+                    retval = u64::MAX;
                     for p in v.iter() {
                         let pval = p.eval()?;
                         if pval < retval {
@@ -186,21 +194,18 @@ impl Packet {
                     }
                     Ok(retval)
                 }
-                OpType::Literal => Err("illegal Literal optype"),
+                OpType::Literal => Err("illegal Literal optype".to_string()),
             },
         }
     }
 }
 
 // read a literal value from BinaryRep, returning (the value, the number of bits in the literal)
-fn parse_literal(br: &mut BinaryRep) -> Result<(usize, usize), &str> {
-    let mut val: usize = 0;
-    let mut bitcount: usize = 6;
+fn parse_literal(br: &mut BinaryRep) -> Result<(u64, u64), String> {
+    let mut val: u64 = 0;
+    let mut bitcount: u64 = 6;
     loop {
-        let subval = match br.get_next_chunk(5) {
-            Ok(s) => s,
-            Err(_) => return Err("bad literal subval"),
-        };
+        let subval = br.get_next_chunk(5)?;
         bitcount += 5;
         if subval < 16 {
             val = val * 16 + subval;
@@ -213,55 +218,29 @@ fn parse_literal(br: &mut BinaryRep) -> Result<(usize, usize), &str> {
     Ok((val, bitcount))
 }
 
-fn parse_operator(br: &mut BinaryRep) -> Result<(Vec<Packet>, usize), &str> {
+// read an operator from BinaryRep, returning (vector affected packets, number of bits) 
+fn parse_operator(br: &mut BinaryRep) -> Result<(Vec<Packet>, u64), String> {
     let mut retval: Vec<Packet> = vec![];
-    let mut bitcount: usize = 6;
+    let mut bitcount: u64 = 6;
 
-    let ltype = match br.get_next_chunk(1) {
-        Ok(s) => s,
-        Err(_) => return Err("bad length type"),
-    };
+    let ltype = br.get_next_chunk(1)?;
     if ltype == 0 {
-        let mut bits_left = match br.get_next_chunk(15) {
-            Ok(s) => s,
-            Err(_) => return Err("bad type 0 length value"),
-        };
+        let mut bits_left = br.get_next_chunk(15)?;
         bitcount += 16 + bits_left;
         while bits_left > 0 {
-            let ver = match br.get_next_chunk(3) {
-                Ok(s) => s as u8,
-                Err(_) => return Err("bad type 0 version"),
-            };
-            let typ = match br.get_next_chunk(3) {
-                Ok(s) => s as u8,
-                Err(_) => return Err("bad type 0 type"),
-            };
-            let packet = match Packet::new(ver, convert_type(typ)?, br) {
-                Ok(s) => s,
-                Err(_) => return Err("bad type 0 operator packet"),
-            };
+            let ver = br.get_next_chunk(3)? as u8;
+            let typ = br.get_next_chunk(3)? as u8;
+            let packet = Packet::new(ver, convert_type(typ)?, br)?;
             bits_left -= packet.bitc; // should never become < 0
             retval.push(packet);
         }
     } else {
-        let pkts_left = match br.get_next_chunk(11) {
-            Ok(s) => s,
-            Err(_) => return Err("bad type 1 length value"),
-        };
+        let pkts_left = br.get_next_chunk(11)?;
         bitcount += 12;
         for _ in 0..pkts_left {
-            let ver = match br.get_next_chunk(3) {
-                Ok(s) => s as u8,
-                Err(_) => return Err("bad type 1 version"),
-            };
-            let typ = match br.get_next_chunk(3) {
-                Ok(s) => s as u8,
-                Err(_) => return Err("bad type 1 type"),
-            };
-            let packet = match Packet::new(ver, convert_type(typ)?, br) {
-                Ok(s) => s,
-                Err(_) => return Err("bad type 1 operator packet"),
-            };
+            let ver = br.get_next_chunk(3)? as u8;
+            let typ = br.get_next_chunk(3)? as u8;
+            let packet = Packet::new(ver, convert_type(typ)?, br)?;
             bitcount += packet.bitc;
             retval.push(packet);
         }
